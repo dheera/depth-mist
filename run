@@ -1,0 +1,1 @@
+python mist_effect.py --input demo06.jpg --output demo06_misted.jpg --orton-blur 0.8 --orton-overlay 0.5 --brightness-adjust 0.3 --contrast-reduction 0.5
