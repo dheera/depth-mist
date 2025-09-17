@@ -45,18 +45,21 @@ def load_depth_model(encoder='vitl', checkpoint_path='depth_anything_v2_vitl.pth
     return model, DEVICE
 
 
-def apply_mist_effect(image, depth_map, contrast_reduction_factor=0.5, brightness_adjustment=0.0):
+def apply_mist_effect(image, depth_map, contrast_reduction_factor=0.5, brightness_adjustment=0.0, 
+                     orton_blur_strength=0.0, orton_overlay_opacity=0.0):
     """
-    Apply mist effect based on depth information
+    Apply mist effect and variable Orton effect based on depth information
     
     Args:
         image: Input image (numpy array, BGR format)
         depth_map: Depth map from Depth Anything V2 (numpy array)
         contrast_reduction_factor: How much to reduce contrast for distant objects (0.0-1.0)
         brightness_adjustment: Brightness adjustment for distant objects (-1.0 to 1.0)
+        orton_blur_strength: Maximum blur strength for Orton effect (0.0-1.0)
+        orton_overlay_opacity: Maximum overlay opacity for Orton effect (0.0-1.0)
     
     Returns:
-        Processed image with mist effect
+        Processed image with mist and Orton effects
     """
     # Normalize depth map to 0-1 range
     depth_normalized = (depth_map - depth_map.min()) / (depth_map.max() - depth_map.min())
@@ -91,14 +94,87 @@ def apply_mist_effect(image, depth_map, contrast_reduction_factor=0.5, brightnes
         
         processed_image[:, :, c] = processed_channel
     
+    # Apply variable Orton effect if requested
+    if orton_blur_strength > 0.0 or orton_overlay_opacity > 0.0:
+        processed_image = apply_variable_orton_effect(
+            processed_image, depth_normalized, orton_blur_strength, orton_overlay_opacity
+        )
+    
     # Convert back to uint8
     processed_image = (processed_image * 255).astype(np.uint8)
     
     return processed_image
 
 
+def apply_variable_orton_effect(image_float, depth_normalized, blur_strength, overlay_opacity):
+    """
+    Apply variable Orton effect that respects depth ordering
+    
+    Args:
+        image_float: Image in float format (0-1)
+        depth_normalized: Normalized depth map (0-1, where 0=distant, 1=close)
+        blur_strength: Maximum blur strength (0-1)
+        overlay_opacity: Maximum overlay opacity (0-1)
+    
+    Returns:
+        Image with variable Orton effect applied
+    """
+    # Create depth layers for Orton effect
+    # We'll process in depth order: distant to close
+    num_layers = 8  # Number of depth layers to process
+    
+    result = image_float.copy()
+    
+    for layer in range(num_layers):
+        # Create mask for this depth layer
+        layer_start = layer / num_layers
+        layer_end = (layer + 1) / num_layers
+        
+        # Mask for pixels in this depth range (distant objects have lower depth values)
+        layer_mask = ((depth_normalized >= layer_start) & (depth_normalized < layer_end)).astype(np.float32)
+        
+        if np.sum(layer_mask) == 0:
+            continue
+        
+        # Calculate blur and overlay strength for this layer
+        # More distant layers (lower layer index) get stronger effect
+        layer_blur_strength = blur_strength * (1.0 - layer_start)
+        layer_overlay_opacity = overlay_opacity * (1.0 - layer_start)
+        
+        if layer_blur_strength > 0.0:
+            # Apply Gaussian blur to this layer
+            kernel_size = int(layer_blur_strength * 20) + 1
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            
+            blurred_layer = cv2.GaussianBlur(result, (kernel_size, kernel_size), 0)
+            
+            # Blend the blurred layer with the original using the layer mask
+            layer_mask_3d = np.stack([layer_mask] * 3, axis=-1)
+            result = result * (1.0 - layer_mask_3d) + blurred_layer * layer_mask_3d
+        
+        if layer_overlay_opacity > 0.0:
+            # Create overlay effect (brighten and increase saturation)
+            overlay = result.copy()
+            
+            # Brighten the overlay
+            overlay = np.clip(overlay * 1.2, 0.0, 1.0)
+            
+            # Increase saturation
+            hsv = cv2.cvtColor((overlay * 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32) / 255.0
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.3, 0.0, 1.0)  # Increase saturation
+            overlay = cv2.cvtColor((hsv * 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
+            
+            # Blend overlay with original
+            layer_mask_3d = np.stack([layer_mask] * 3, axis=-1)
+            result = result * (1.0 - layer_overlay_opacity * layer_mask_3d) + overlay * (layer_overlay_opacity * layer_mask_3d)
+    
+    return result
+
+
 def process_single_image(model, device, image_path, output_path, 
                         contrast_reduction_factor=0.5, brightness_adjustment=0.0,
+                        orton_blur_strength=0.0, orton_overlay_opacity=0.0,
                         input_size=518):
     """Process a single image with mist effect"""
     print(f"Processing: {image_path}")
@@ -113,7 +189,8 @@ def process_single_image(model, device, image_path, output_path,
     depth_map = model.infer_image(image, input_size)
     
     # Apply mist effect
-    misty_image = apply_mist_effect(image, depth_map, contrast_reduction_factor, brightness_adjustment)
+    misty_image = apply_mist_effect(image, depth_map, contrast_reduction_factor, brightness_adjustment,
+                                   orton_blur_strength, orton_overlay_opacity)
     
     # Save result
     cv2.imwrite(output_path, misty_image)
@@ -142,10 +219,14 @@ def main():
                        help='Input size for depth estimation (default: 518)')
     
     # Effect parameters
-    parser.add_argument('--contrast-reduction', type=float, default=0.5,
+    parser.add_argument('--contrast-reduction', type=float, default=0.0,
                        help='Contrast reduction factor for distant objects (0.0-1.0, default: 0.5)')
     parser.add_argument('--brightness-adjustment', type=float, default=0.0,
                        help='Brightness adjustment for distant objects (-1.0 to 1.0, default: 0.0)')
+    parser.add_argument('--orton-blur', type=float, default=0.0,
+                       help='Maximum blur strength for Orton effect (0.0-1.0, default: 0.0)')
+    parser.add_argument('--orton-overlay', type=float, default=0.0,
+                       help='Maximum overlay opacity for Orton effect (0.0-1.0, default: 0.0)')
     
     # File filtering
     parser.add_argument('--extensions', type=str, nargs='+', 
@@ -177,7 +258,8 @@ def main():
         # Single image
         success = process_single_image(
             model, device, args.input, args.output,
-            args.contrast_reduction, args.brightness_adjustment, args.input_size
+            args.contrast_reduction, args.brightness_adjustment, 
+            args.orton_blur, args.orton_overlay, args.input_size
         )
         if not success:
             return
@@ -203,7 +285,8 @@ def main():
             
             success = process_single_image(
                 model, device, image_path, output_path,
-                args.contrast_reduction, args.brightness_adjustment, args.input_size
+                args.contrast_reduction, args.brightness_adjustment, 
+                args.orton_blur, args.orton_overlay, args.input_size
             )
             
             if not success:
