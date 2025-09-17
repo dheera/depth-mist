@@ -154,8 +154,12 @@ def apply_variable_orton_effect(image_float, depth_normalized, blur_strength, ov
         hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.3, 0.0, 1.0)  # Increase saturation
         overlay = cv2.cvtColor((hsv * 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
         
-        # Blend overlay with original based on depth
-        result = result * (1.0 - overlay_opacity * blur_mask_3d) + overlay * (overlay_opacity * blur_mask_3d)
+        # Apply "lighten only" blending: only brighten, never darken
+        # This prevents dark areas from bleeding into light areas
+        overlay_mask_3d = np.stack([blur_mask] * 3, axis=-1)
+        
+        # Lighten only: take the maximum of original and overlay
+        result = np.maximum(result, overlay * overlay_opacity * overlay_mask_3d)
     
     return result
 
