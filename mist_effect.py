@@ -119,55 +119,43 @@ def apply_variable_orton_effect(image_float, depth_normalized, blur_strength, ov
     Returns:
         Image with variable Orton effect applied
     """
-    # Create depth layers for Orton effect
-    # We'll process in depth order: distant to close
-    num_layers = 8  # Number of depth layers to process
+    if blur_strength <= 0.0 and overlay_opacity <= 0.0:
+        return image_float
     
+    # Keep the original image sharp as the base
     result = image_float.copy()
     
-    for layer in range(num_layers):
-        # Create mask for this depth layer
-        layer_start = layer / num_layers
-        layer_end = (layer + 1) / num_layers
+    # Create a blurred version of the entire image
+    max_kernel_size = int(blur_strength * 20) + 1
+    if max_kernel_size % 2 == 0:
+        max_kernel_size += 1
+    
+    blurred_image = cv2.GaussianBlur(image_float, (max_kernel_size, max_kernel_size), 0)
+    
+    # Create depth-aware blending mask
+    # Distant objects (lower depth values) get more blur
+    # Close objects (higher depth values) stay sharp
+    blur_mask = 1.0 - depth_normalized  # Invert so distant = high blur, close = low blur
+    
+    # Apply blur effect: blend blurred image with original based on depth
+    blur_mask_3d = np.stack([blur_mask] * 3, axis=-1)
+    result = result * (1.0 - blur_strength * blur_mask_3d) + blurred_image * (blur_strength * blur_mask_3d)
+    
+    # Apply overlay effect if requested
+    if overlay_opacity > 0.0:
+        # Create overlay effect (brighten and increase saturation)
+        overlay = result.copy()
         
-        # Mask for pixels in this depth range (distant objects have lower depth values)
-        layer_mask = ((depth_normalized >= layer_start) & (depth_normalized < layer_end)).astype(np.float32)
+        # Brighten the overlay
+        overlay = np.clip(overlay * 1.2, 0.0, 1.0)
         
-        if np.sum(layer_mask) == 0:
-            continue
+        # Increase saturation
+        hsv = cv2.cvtColor((overlay * 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32) / 255.0
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.3, 0.0, 1.0)  # Increase saturation
+        overlay = cv2.cvtColor((hsv * 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
         
-        # Calculate blur and overlay strength for this layer
-        # More distant layers (lower layer index) get stronger effect
-        layer_blur_strength = blur_strength * (1.0 - layer_start)
-        layer_overlay_opacity = overlay_opacity * (1.0 - layer_start)
-        
-        if layer_blur_strength > 0.0:
-            # Apply Gaussian blur to this layer
-            kernel_size = int(layer_blur_strength * 20) + 1
-            if kernel_size % 2 == 0:
-                kernel_size += 1
-            
-            blurred_layer = cv2.GaussianBlur(result, (kernel_size, kernel_size), 0)
-            
-            # Blend the blurred layer with the original using the layer mask
-            layer_mask_3d = np.stack([layer_mask] * 3, axis=-1)
-            result = result * (1.0 - layer_mask_3d) + blurred_layer * layer_mask_3d
-        
-        if layer_overlay_opacity > 0.0:
-            # Create overlay effect (brighten and increase saturation)
-            overlay = result.copy()
-            
-            # Brighten the overlay
-            overlay = np.clip(overlay * 1.2, 0.0, 1.0)
-            
-            # Increase saturation
-            hsv = cv2.cvtColor((overlay * 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32) / 255.0
-            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.3, 0.0, 1.0)  # Increase saturation
-            overlay = cv2.cvtColor((hsv * 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
-            
-            # Blend overlay with original
-            layer_mask_3d = np.stack([layer_mask] * 3, axis=-1)
-            result = result * (1.0 - layer_overlay_opacity * layer_mask_3d) + overlay * (layer_overlay_opacity * layer_mask_3d)
+        # Blend overlay with original based on depth
+        result = result * (1.0 - overlay_opacity * blur_mask_3d) + overlay * (overlay_opacity * blur_mask_3d)
     
     return result
 
